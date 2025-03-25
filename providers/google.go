@@ -17,9 +17,7 @@
 package providers
 
 import (
-	"context"
 	"net/http"
-
 	"time"
 
 	"github.com/openpubkey/openpubkey/discover"
@@ -120,9 +118,7 @@ func NewGoogleOpWithOptions(opts *GoogleOptions) BrowserOpenIdProvider {
 			issuer:                    opts.Issuer,
 			requestTokensOverrideFunc: nil,
 			publicKeyFinder: discover.PublicKeyFinder{
-				JwksFunc: func(ctx context.Context, issuer string) ([]byte, error) {
-					return discover.GetJwksByIssuer(ctx, issuer, opts.HttpClient)
-				},
+				JwksFunc: discover.DefaultJwksFetchFunc(opts.HttpClient),
 			},
 		},
 	}

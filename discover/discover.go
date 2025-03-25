@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -76,13 +77,18 @@ func NewPublicKeyRecord(key jwk.Key, issuer string) (*PublicKeyRecord, error) {
 
 func DefaultPubkeyFinder() *PublicKeyFinder {
 	return &PublicKeyFinder{
-		JwksFunc: func(ctx context.Context, issuer string) ([]byte, error) {
-			return GetJwksByIssuer(ctx, issuer, nil)
-		},
+		JwksFunc: DefaultJwksFetchFunc(nil),
 	}
 }
 
 type JwksFetchFunc func(ctx context.Context, issuer string) ([]byte, error)
+
+func DefaultJwksFetchFunc(httpClient *http.Client) JwksFetchFunc {
+	return func(ctx context.Context, issuer string) ([]byte, error) {
+		body, _, err := GetJwksByIssuer(ctx, issuer, httpClient)
+		return body, err
+	}
+}
 
 type PublicKeyFinder struct {
 	JwksFunc JwksFetchFunc
@@ -92,35 +98,44 @@ type PublicKeyFinder struct {
 // issuer's well-known configuration. It doesn't attempt to parse the response
 // but instead returns the JSON bytes of the JWKS. If httpClient is nil, then
 // http.DefaultClient is used when fetching.
-func GetJwksByIssuer(ctx context.Context, issuer string, httpClient *http.Client) ([]byte, error) {
+func GetJwksByIssuer(ctx context.Context, issuer string, httpClient *http.Client) (body []byte, expires time.Time, err error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 
 	discConf, err := oidcclient.Discover(ctx, issuer, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("failed to call OIDC discovery endpoint: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to call OIDC discovery endpoint: %w", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, "GET", discConf.JwksURI, nil)
+	jwksUri := discConf.JwksURI
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksUri, nil)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, fmt.Errorf("creating JKWS request for URI %q: %w", jwksUri, err)
 	}
 
-	response, err := httpClient.Do(request)
+	resp, err := httpClient.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, fmt.Errorf("failed to fetch to JWKS from URI %q: %w", jwksUri, err)
 	}
-	defer response.Body.Close()
-
-	resp, err := httpClient.Get(discConf.JwksURI)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch to JWKS: %w", err)
-	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-200 from JWKS URI: %s", http.StatusText(response.StatusCode))
+		return nil, time.Time{}, fmt.Errorf("received non-200 from JWKS URI %q: %s", jwksUri, resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("reading response body from JWKS URI %q: %w", jwksUri, err)
+	}
+	expiresHdr := resp.Header.Get("Expires")
+	if expiresHdr == "" {
+		return body, time.Now(), nil
+	}
+	expires, err = time.Parse(time.RFC1123, expiresHdr)
+	if err != nil {
+		return body, time.Now(), nil
+	}
+	return body, expires, nil
 }
 
 func (f *PublicKeyFinder) fetchAndParseJwks(ctx context.Context, issuer string) (jwk.Set, error) {
