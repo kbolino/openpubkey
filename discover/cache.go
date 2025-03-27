@@ -2,17 +2,36 @@ package discover
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
 
 type jwksCacheEntry struct {
-	value   []byte
-	expires time.Time
+	Value   []byte
+	Expires time.Time
 }
 
 type JwksFetchWithExpiresFunc func(ctx context.Context, issuer string) ([]byte, time.Time, error)
+
+func JwksFetchFirst(funcs ...JwksFetchWithExpiresFunc) JwksFetchWithExpiresFunc {
+	return func(ctx context.Context, issuer string) ([]byte, time.Time, error) {
+		var errs []error
+		for _, f := range funcs {
+			value, expires, err := f(ctx, issuer)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			} else if value == nil {
+				errs = append(errs, errors.New("not found"))
+				continue
+			}
+			return value, expires, nil
+		}
+		return nil, time.Time{}, fmt.Errorf("all fetch functions failed: %w", errors.Join(errs...))
+	}
+}
 
 // JwksCache caches JWKS responses by issuer. It is safe for use by multiple
 // concurrent goroutines.
@@ -68,11 +87,11 @@ func (c *JwksCache) GetJwksByIssuer(ctx context.Context, issuer string) ([]byte,
 		return nil, fmt.Errorf("fetching updated JWKS after cache miss: %w", err)
 	}
 	entry := jwksCacheEntry{
-		value:   value,
-		expires: expires,
+		Value:   value,
+		Expires: expires,
 	}
 	c.entries[issuer] = entry
-	return entry.value, nil
+	return entry.Value, nil
 }
 
 func (c *JwksCache) getEntryUnchecked(now time.Time, issuer string) (value []byte, ok bool) {
@@ -80,8 +99,8 @@ func (c *JwksCache) getEntryUnchecked(now time.Time, issuer string) (value []byt
 	if !ok {
 		return nil, false
 	}
-	if now.After(entry.expires) {
+	if now.After(entry.Expires) {
 		return nil, false
 	}
-	return entry.value, true
+	return entry.Value, true
 }
